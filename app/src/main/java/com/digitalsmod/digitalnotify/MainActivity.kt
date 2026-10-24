@@ -26,6 +26,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -121,9 +122,9 @@ class MainActivity : Activity() {
 
         scrollView.addView(
             content,
-            ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT,
-                ScrollView.LayoutParams.WRAP_CONTENT
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
             )
         )
         root.addView(scrollView, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -138,8 +139,7 @@ class MainActivity : Activity() {
         })
 
         content.addView(TextView(this).apply {
-            text = "Liquid Glass
-Notifications."
+            text = "Liquid Glass\nNotifications."
             textSize = 32f
             setLineSpacing(dp(1).toFloat(), 0.96f)
             setTextColor(Color.WHITE)
@@ -545,8 +545,7 @@ Notifications."
         content.addView(appsCard, topMargin(14))
 
         content.addView(TextView(this).apply {
-            text = "DIGITALNOTIFY · v0.2.0 Pro Liquid Glass
-Mẹo: Vuốt banner lên hoặc sang ngang để đóng nhanh, chạm giữ để dừng đếm ngược, hoặc nhấn vào banner để mở trực tiếp cuộc trò chuyện."
+            text = "DIGITALNOTIFY · v0.2.0 Pro Liquid Glass\nMẹo: Vuốt banner lên hoặc sang ngang để đóng nhanh, chạm giữ để dừng đếm ngược, hoặc nhấn vào banner để mở trực tiếp cuộc trò chuyện."
             textSize = 11.5f
             setTextColor(MUTED)
             setLineSpacing(dp(3).toFloat(), 1f)
