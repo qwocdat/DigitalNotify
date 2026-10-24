@@ -1,14 +1,18 @@
 package com.digitalsmod.digitalnotify
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.app.ActivityOptions
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.GradientDrawable
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -17,18 +21,18 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.text.TextUtils
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
-import android.view.animation.OvershootInterpolator
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.dynamicanimation.animation.DynamicAnimation
-import androidx.dynamicanimation.animation.SpringAnimation
-import androidx.dynamicanimation.animation.SpringForce
 import java.util.ArrayDeque
 import kotlin.math.abs
 
@@ -39,130 +43,202 @@ internal data class BannerData(
     val body: String,
     val postTime: Long,
     val contentIntent: PendingIntent? = null,
-    val customIcon: Drawable? = null
+    val largeIcon: Drawable? = null,
+    val appBadgeIcon: Drawable? = null,
+    val timeLabel: String = "now"
 )
 
-internal class OverlayController(private val context: Context) {
+internal object OverlayManager {
+    @Volatile
+    private var controller: OverlayController? = null
+
+    fun get(context: Context): OverlayController {
+        return controller ?: synchronized(this) {
+            controller ?: OverlayController(context.applicationContext).also {
+                controller = it
+            }
+        }
+    }
+}
+
+internal class OverlayController(private val appContext: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    private val prefs = context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE)
+    private val uiContext: Context = createOverlayWindowContext(appContext)
+    private val windowManager = uiContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val prefs = appContext.getSharedPreferences(AppPrefs.PREFS, Context.MODE_PRIVATE)
     private val queue = ArrayDeque<BannerData>()
 
     private var activeView: GlassBannerView? = null
     private var activeData: BannerData? = null
-    private var activeTitleView: TextView? = null
-    private var activeBodyView: TextView? = null
+    private var activeAnimator: ValueAnimator? = null
+    private var isTransitioningOut = false
     private var timeout: Runnable? = null
-    private var disposed = false
+
+    // Exact fluid expansion curve from 90047.mp4 (Frames F50..F64: fast launch from capsule, zero bouncy overshoot)
+    private val expandInterpolator = PathInterpolator(0.20f, 0.92f, 0.28f, 1.0f)
+    // Exact collapse curve from 90047.mp4 (Frames F196..F201 and F418..F424)
+    private val collapseInterpolator = PathInterpolator(0.32f, 0.0f, 0.67f, 0.0f)
+
+    private fun createOverlayWindowContext(base: Context): Context {
+        return try {
+            val dm = base.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
+            val dispCtx = if (display != null) base.createDisplayContext(display) else base
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                dispCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+            } else {
+                dispCtx
+            }
+        } catch (_: Exception) {
+            base
+        }
+    }
 
     fun show(data: BannerData) {
         mainHandler.post {
-            if (disposed || !Settings.canDrawOverlays(context)) return@post
+            if (!Settings.canDrawOverlays(appContext)) return@post
 
             val current = activeData
+            // Avoid duplicate burst callbacks with identical content within 800ms
             if (current != null &&
                 current.packageName == data.packageName &&
                 current.title == data.title &&
                 current.body == data.body &&
-                abs(data.postTime - current.postTime) < 2500L
+                abs(data.postTime - current.postTime) < 800L
             ) {
                 return@post
             }
 
-            // If same app posts a new message while its banner is currently open, update in-place smoothly
-            if (current != null && activeView != null && current.packageName == data.packageName) {
-                activeData = data
-                activeTitleView?.text = data.title
-                activeBodyView?.text = data.body
-                activeView?.playEntranceSweep()
-                scheduleAutoDismiss()
+            if (queue.size >= 12) queue.removeFirst()
+
+            // If a banner is currently displayed, collapse it back into the top-left capsule
+            // and immediately expand the new notification (just like 00:06.6 in 90047.mp4!)
+            if (activeView != null) {
+                queue.addFirst(data)
+                if (!isTransitioningOut) {
+                    dismissCurrent(openApp = false, fastReplace = true)
+                }
                 return@post
             }
 
-            if (queue.size >= 10) queue.removeFirst()
             queue.addLast(data)
-            if (activeView == null) showNext()
+            if (!isTransitioningOut) {
+                showNext()
+            }
         }
     }
 
     private fun showNext() {
-        if (disposed || activeView != null || queue.isEmpty()) return
-        if (!Settings.canDrawOverlays(context)) {
+        if (activeView != null || isTransitioningOut || queue.isEmpty()) return
+        if (!Settings.canDrawOverlays(appContext)) {
             queue.clear()
             return
         }
 
         val data = queue.removeFirst()
-        val themeIndex = prefs.getInt(MainActivity.KEY_THEME_INDEX, 0)
-        val isBottom = prefs.getBoolean(MainActivity.KEY_POSITION_BOTTOM, false)
-        val shouldVibrate = prefs.getBoolean(MainActivity.KEY_VIBRATE_ENABLED, true)
+        val themeIndex = prefs.getInt(AppPrefs.KEY_THEME_INDEX, 0)
+        val shouldVibrate = prefs.getBoolean(AppPrefs.KEY_VIBRATE_ENABLED, true)
 
-        val view = buildBanner(data, themeIndex, isBottom)
-        val metrics = context.resources.displayMetrics
-        val maxWidth = dp(440)
-        val width = (metrics.widthPixels - dp(24)).coerceAtLeast(dp(240)).coerceAtMost(maxWidth)
+        val metrics = uiContext.resources.displayMetrics
+        val bannerWidth = (metrics.widthPixels - dp(12)).coerceAtLeast(dp(260))
+        val (view, contentRow) = buildBanner(data, themeIndex)
 
-        val params = WindowManager.LayoutParams(
-            width,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = (if (isBottom) Gravity.BOTTOM else Gravity.TOP) or Gravity.CENTER_HORIZONTAL
-            x = 0
-            y = if (isBottom) dp(28) else (statusBarHeight() + dp(8))
-            windowAnimations = 0
-            dimAmount = 0f
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
         }
 
-        try {
-            activeView = view
-            activeData = data
-            windowManager.addView(view, params)
-
-            if (shouldVibrate) {
-                triggerSubtleHaptic()
+        val params = WindowManager.LayoutParams(
+            bannerWidth,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            flags,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            x = 0
+            y = statusBarHeight() + dp(5)
+            windowAnimations = 0
+            dimAmount = 0f
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setBlurBehindRadius(dp(22))
             }
+        }
 
-            val startOffset = if (isBottom) dp(72).toFloat() else -dp(72).toFloat()
-            view.alpha = 0f
-            view.scaleX = 0.94f
-            view.scaleY = 0.94f
-            view.translationY = startOffset
-            view.animate()
-                .alpha(1f)
-                .scaleX(1f)
-                .scaleY(1f)
-                .setDuration(250L)
-                .setInterpolator(OvershootInterpolator(0.8f))
-                .start()
-
-            SpringAnimation(view, DynamicAnimation.TRANSLATION_Y, 0f).apply {
-                spring = SpringForce(0f)
-                    .setDampingRatio(0.76f)
-                    .setStiffness(620f)
-                setStartValue(startOffset)
-                start()
-            }
-
-            view.playEntranceSweep()
-            scheduleAutoDismiss()
-        } catch (_: Exception) {
+        val added = tryAddOverlayView(view, params)
+        if (!added) {
             activeView = null
             activeData = null
-            activeTitleView = null
-            activeBodyView = null
+            isTransitioningOut = false
             mainHandler.post { showNext() }
+            return
+        }
+
+        activeView = view
+        activeData = data
+
+        if (shouldVibrate) {
+            triggerSubtleHaptic()
+        }
+
+        // Exact mathematical trajectory solved from Frames F50..F64 of 90047.mp4:
+        // Fixed horizontal anchor at 11.8% of banner width (directly below the status-bar clock "7:25")
+        val pivotX = bannerWidth * 0.118f
+        val startScaleX = 0.11f
+        val startScaleY = 0.095f
+        val startTransY = -dp(16).toFloat()
+
+        view.pivotX = pivotX
+        view.pivotY = 0f
+        view.scaleX = startScaleX
+        view.scaleY = startScaleY
+        view.translationY = startTransY
+        view.alpha = 0.82f
+        contentRow.alpha = 0.15f
+
+        activeAnimator?.cancel()
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 430L
+            interpolator = expandInterpolator
+            addUpdateListener { va ->
+                val f = va.animatedFraction
+                val p = va.animatedValue as Float
+                view.scaleX = startScaleX + (1f - startScaleX) * p
+                view.scaleY = startScaleY + (1f - startScaleY) * p
+                view.translationY = startTransY * (1f - p)
+                // Alpha reaches 1.0 within first 20% of expansion so the tiny capsule is clearly visible
+                view.alpha = (0.82f + f * 0.9f).coerceIn(0f, 1f)
+                contentRow.alpha = ((f - 0.08f) / 0.52f).coerceIn(0f, 1f)
+            }
+        }
+        activeAnimator = anim
+        anim.start()
+
+        view.playEntranceSweep()
+        scheduleAutoDismiss()
+    }
+
+    private fun tryAddOverlayView(view: View, params: WindowManager.LayoutParams): Boolean {
+        return try {
+            windowManager.addView(view, params)
+            true
+        } catch (_: Exception) {
+            try {
+                val fallbackWm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                fallbackWm.addView(view, params)
+                true
+            } catch (_: Exception) {
+                false
+            }
         }
     }
 
     private fun scheduleAutoDismiss() {
         timeout?.let { mainHandler.removeCallbacks(it) }
-        val durationMs = prefs.getLong(MainActivity.KEY_BANNER_DURATION_MS, 5200L).coerceIn(2000L, 15000L)
-        val end = Runnable { dismissCurrent(openApp = false) }
+        val durationMs = prefs.getLong(AppPrefs.KEY_BANNER_DURATION_MS, 5500L).coerceIn(2000L, 15000L)
+        val end = Runnable { dismissCurrent(openApp = false, fastReplace = false) }
         timeout = end
         mainHandler.postDelayed(end, durationMs)
     }
@@ -172,103 +248,122 @@ internal class OverlayController(private val context: Context) {
         timeout = null
     }
 
-    private fun buildBanner(data: BannerData, themeIndex: Int, isBottom: Boolean): GlassBannerView {
-        val root = GlassBannerView(context, themeIndex).apply {
-            setPadding(dp(14), dp(13), dp(12), dp(13))
-            elevation = dp(18).toFloat()
+    private fun buildBanner(data: BannerData, themeIndex: Int): Pair<GlassBannerView, LinearLayout> {
+        val isDarkTheme = themeIndex == 1
+        val titleColor = if (isDarkTheme) Color.WHITE else Color.rgb(18, 20, 24)
+        val bodyColor = if (isDarkTheme) Color.rgb(222, 228, 240) else Color.rgb(26, 28, 34)
+        val timeColor = if (isDarkTheme) Color.rgb(170, 182, 205) else Color.argb(160, 42, 40, 44)
+
+        val root = GlassBannerView(uiContext, themeIndex).apply {
+            setPadding(dp(15), dp(14), dp(18), dp(14))
+            elevation = dp(14).toFloat()
             isClickable = true
-            contentDescription = "Thông báo từ ${data.appName}: ${data.title}. ${data.body}"
+            contentDescription = "${data.title}: ${data.body}"
         }
 
-        val row = LinearLayout(context).apply {
+        val row = LinearLayout(uiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        val appIcon = ImageView(context).apply {
-            val iconDrawable = data.customIcon ?: try {
-                context.packageManager.getApplicationIcon(data.packageName)
-            } catch (_: Exception) {
-                makeFallbackIcon()
-            }
-            setImageDrawable(iconDrawable)
+        val avatarContainer = FrameLayout(uiContext)
+        val avatarSizePx = dp(46)
+        val badgeSizePx = dp(20)
+
+        val appDrawable = data.appBadgeIcon ?: try {
+            uiContext.packageManager.getApplicationIcon(data.packageName)
+        } catch (_: Exception) {
+            null
+        }
+
+        val mainAvatarDrawable = if (data.largeIcon != null) {
+            DemoIcons.makeCircularAvatar(uiContext.resources, data.largeIcon, avatarSizePx, data.title)
+        } else if (appDrawable != null) {
+            DemoIcons.makeCircularAvatar(uiContext.resources, appDrawable, avatarSizePx, data.title)
+        } else {
+            DemoIcons.makeCircularAvatar(uiContext.resources, null, avatarSizePx, data.title)
+        }
+
+        val avatarView = ImageView(uiContext).apply {
+            setImageDrawable(mainAvatarDrawable)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            background = rounded(Color.argb(75, 42, 54, 78), dp(13))
-            setPadding(dp(4), dp(4), dp(4), dp(4))
         }
-        row.addView(appIcon, LinearLayout.LayoutParams(dp(44), dp(44)))
+        avatarContainer.addView(
+            avatarView,
+            FrameLayout.LayoutParams(avatarSizePx, avatarSizePx, Gravity.TOP or Gravity.START)
+        )
 
-        val textColumn = LinearLayout(context).apply {
+        if (appDrawable != null) {
+            val badgeView = ImageView(uiContext).apply {
+                setImageDrawable(appDrawable)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, dp(5).toFloat())
+                    }
+                }
+                clipToOutline = true
+                elevation = dp(2).toFloat()
+            }
+            avatarContainer.addView(
+                badgeView,
+                FrameLayout.LayoutParams(badgeSizePx, badgeSizePx, Gravity.BOTTOM or Gravity.END)
+            )
+        }
+
+        row.addView(avatarContainer, LinearLayout.LayoutParams(dp(50), dp(48)))
+
+        val textColumn = LinearLayout(uiContext).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, dp(6), 0)
+            setPadding(dp(12), 0, 0, 0)
         }
 
-        val header = LinearLayout(context).apply {
+        val topRow = LinearLayout(uiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        header.addView(TextView(context).apply {
-            text = data.appName.uppercase()
-            textSize = 10f
-            letterSpacing = 0.08f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(Color.rgb(185, 206, 248))
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        }, LinearLayout.LayoutParams(0, -2, 1f))
 
-        header.addView(TextView(context).apply {
-            text = "VỪA XONG"
-            textSize = 9f
-            letterSpacing = 0.05f
-            setTextColor(Color.rgb(150, 165, 190))
-        })
-        textColumn.addView(header, LinearLayout.LayoutParams(-1, -2))
-
-        val titleTv = TextView(context).apply {
+        val titleTv = TextView(uiContext).apply {
             text = data.title
-            textSize = 14f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(Color.WHITE)
+            textSize = 15.5f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(titleColor)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(2), 0, 0)
         }
-        activeTitleView = titleTv
-        textColumn.addView(titleTv, LinearLayout.LayoutParams(-1, -2))
+        topRow.addView(titleTv, LinearLayout.LayoutParams(0, -2, 1f))
 
-        val bodyTv = TextView(context).apply {
-            text = data.body
-            textSize = 12.5f
-            setTextColor(Color.rgb(216, 224, 238))
-            maxLines = 3
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(2), 0, 0)
+        val nowTv = TextView(uiContext).apply {
+            text = data.timeLabel
+            textSize = 13f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            setTextColor(timeColor)
+            setPadding(dp(8), 0, 0, 0)
         }
-        activeBodyView = bodyTv
+        topRow.addView(nowTv, LinearLayout.LayoutParams(-2, -2))
+
+        textColumn.addView(topRow, LinearLayout.LayoutParams(-1, -2))
+
+        val bodyTv = TextView(uiContext).apply {
+            text = data.body
+            textSize = 14.5f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            setTextColor(bodyColor)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(2), dp(12), 0)
+        }
         textColumn.addView(bodyTv, LinearLayout.LayoutParams(-1, -2))
 
         row.addView(textColumn, LinearLayout.LayoutParams(0, -2, 1f))
+        root.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL))
 
-        val close = TextView(context).apply {
-            text = "×"
-            textSize = 20f
-            gravity = Gravity.CENTER
-            setTextColor(Color.rgb(218, 226, 242))
-            background = rounded(Color.argb(42, 255, 255, 255), dp(16))
-            contentDescription = "Đóng thông báo"
-            setOnClickListener { dismissCurrent(openApp = false) }
-        }
-        row.addView(close, LinearLayout.LayoutParams(dp(30), dp(30)).apply { leftMargin = dp(6) })
-        root.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
-
-        attachTouchGestures(root, isBottom)
-        close.bringToFront()
-        return root
+        attachTouchGestures(root)
+        return root to row
     }
 
-    private fun attachTouchGestures(view: GlassBannerView, isBottom: Boolean) {
-        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private fun attachTouchGestures(view: GlassBannerView) {
+        val touchSlop = ViewConfiguration.get(uiContext).scaledTouchSlop
         var startX = 0f
         var startY = 0f
         var isDragging = false
@@ -289,35 +384,30 @@ internal class OverlayController(private val context: Context) {
                         isDragging = true
                     }
                     if (isDragging) {
-                        v.translationX = dx * 0.85f
-                        val allowedDy = if (isBottom) dy.coerceAtLeast(-dp(18).toFloat()) else dy.coerceAtMost(dp(18).toFloat())
-                        v.translationY = allowedDy
-                        val distance = (abs(dx) + abs(allowedDy)).coerceAtMost(dp(180).toFloat())
-                        v.alpha = (1f - (distance / dp(220).toFloat())).coerceIn(0.25f, 1f)
+                        v.translationX = dx * 0.6f
+                        v.translationY = dy.coerceAtMost(dp(18).toFloat())
                     }
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     val dx = event.rawX - startX
                     val dy = event.rawY - startY
-                    val dismissVertical = if (isBottom) dy > dp(36) else dy < -dp(36)
-                    val dismissHorizontal = abs(dx) > dp(75)
+                    val dismissSwipe = dy < -dp(26) || abs(dx) > dp(75)
 
                     if (isDragging) {
-                        if (dismissVertical || dismissHorizontal) {
-                            dismissCurrent(openApp = false)
+                        if (dismissSwipe) {
+                            dismissCurrent(openApp = false, fastReplace = false)
                         } else {
                             v.animate()
                                 .translationX(0f)
                                 .translationY(0f)
-                                .alpha(1f)
-                                .setDuration(180L)
+                                .setDuration(160L)
                                 .start()
                             scheduleAutoDismiss()
                         }
                     } else if (event.actionMasked == MotionEvent.ACTION_UP) {
                         v.performClick()
-                        dismissCurrent(openApp = true)
+                        dismissCurrent(openApp = true, fastReplace = false)
                     } else {
                         scheduleAutoDismiss()
                     }
@@ -328,41 +418,88 @@ internal class OverlayController(private val context: Context) {
         }
     }
 
-    private fun dismissCurrent(openApp: Boolean) {
+    /**
+     * Exact reverse trajectory from Frames F196..F201 and F418..F424 of 90047.mp4:
+     * Shrinks back into the tiny top-left capsule under the clock, staying visible as a capsule
+     * until the final 25% of the collapse when it fades out.
+     */
+    private fun dismissCurrent(openApp: Boolean, fastReplace: Boolean) {
         mainHandler.post {
             timeout?.let { mainHandler.removeCallbacks(it) }
             timeout = null
             val view = activeView
             val data = activeData
             if (view == null) {
+                isTransitioningOut = false
                 if (openApp && data != null) openNotificationTarget(data)
                 showNext()
                 return@post
             }
-            activeView = null
-            activeData = null
-            activeTitleView = null
-            activeBodyView = null
 
-            val isBottom = prefs.getBoolean(MainActivity.KEY_POSITION_BOTTOM, false)
-            val exitY = if (isBottom) dp(42).toFloat() else -dp(42).toFloat()
+            isTransitioningOut = true
+            activeAnimator?.cancel()
+            view.animate().cancel()
 
-            val finish = Runnable {
-                try {
-                    windowManager.removeView(view)
-                } catch (_: Exception) {
+            val w = if (view.width > 0) view.width else (uiContext.resources.displayMetrics.widthPixels - dp(12))
+            view.pivotX = w * 0.118f
+            view.pivotY = 0f
+
+            val startScaleX = view.scaleX
+            val startScaleY = view.scaleY
+            val startTransX = view.translationX
+            val startTransY = view.translationY
+            val endScaleX = 0.11f
+            val endScaleY = 0.095f
+            val endTransY = -dp(16).toFloat()
+
+            val collapseDuration = if (fastReplace) 185L else 225L
+
+            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = collapseDuration
+                interpolator = collapseInterpolator
+                addUpdateListener { va ->
+                    val f = va.animatedFraction
+                    val p = va.animatedValue as Float
+                    view.scaleX = startScaleX + (endScaleX - startScaleX) * p
+                    view.scaleY = startScaleY + (endScaleY - startScaleY) * p
+                    view.translationX = startTransX * (1f - p)
+                    view.translationY = startTransY + (endTransY - startTransY) * p
+                    // Keep capsule visible until f=0.72 (matching F422..F423), then fade to 0
+                    view.alpha = if (f < 0.72f) 1f else ((1f - f) / 0.28f).coerceIn(0f, 1f)
                 }
-                if (openApp && data != null) openNotificationTarget(data)
-                showNext()
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        safeRemoveOverlayView(view)
+                        activeView = null
+                        activeData = null
+                        activeAnimator = null
+                        isTransitioningOut = false
+                        if (openApp && data != null) {
+                            openNotificationTarget(data)
+                        }
+                        if (fastReplace) {
+                            mainHandler.postDelayed({ showNext() }, 40L)
+                        } else {
+                            showNext()
+                        }
+                    }
+                })
             }
-            view.animate()
-                .alpha(0f)
-                .scaleX(0.95f)
-                .scaleY(0.95f)
-                .translationY(exitY)
-                .setDuration(170L)
-                .withEndAction(finish)
-                .start()
+            activeAnimator = anim
+            anim.start()
+        }
+    }
+
+    private fun safeRemoveOverlayView(view: View) {
+        try {
+            windowManager.removeViewImmediate(view)
+            return
+        } catch (_: Exception) {
+        }
+        try {
+            val fallbackWm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            fallbackWm.removeViewImmediate(view)
+        } catch (_: Exception) {
         }
     }
 
@@ -375,20 +512,19 @@ internal class OverlayController(private val context: Context) {
                         .setPendingIntentBackgroundActivityStartMode(
                             ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
                         )
-                    pending.send(context, 0, null, null, null, null, options.toBundle())
+                    pending.send(appContext, 0, null, null, null, null, options.toBundle())
                 } else {
                     pending.send()
                 }
                 return
             } catch (_: Exception) {
-                // Fall back to launching the package's main activity below
             }
         }
 
         try {
-            val intent = context.packageManager.getLaunchIntentForPackage(data.packageName) ?: return
+            val intent = appContext.packageManager.getLaunchIntentForPackage(data.packageName) ?: return
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(intent)
+            appContext.startActivity(intent)
         } catch (_: Exception) {
         }
     }
@@ -396,52 +532,23 @@ internal class OverlayController(private val context: Context) {
     private fun triggerSubtleHaptic() {
         try {
             val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                val vm = appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
                 vm?.defaultVibrator
             } else {
                 @Suppress("DEPRECATION")
-                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             }
             if (vibrator?.hasVibrator() == true) {
-                vibrator.vibrate(VibrationEffect.createOneShot(18L, VibrationEffect.DEFAULT_AMPLITUDE))
+                vibrator.vibrate(VibrationEffect.createOneShot(15L, VibrationEffect.DEFAULT_AMPLITUDE))
             }
         } catch (_: Exception) {
         }
     }
 
-    fun dispose() {
-        mainHandler.post {
-            disposed = true
-            timeout?.let { mainHandler.removeCallbacks(it) }
-            timeout = null
-            queue.clear()
-            activeView?.let { view ->
-                try {
-                    windowManager.removeView(view)
-                } catch (_: Exception) {
-                }
-            }
-            activeView = null
-            activeData = null
-            activeTitleView = null
-            activeBodyView = null
-        }
-    }
-
-    private fun makeFallbackIcon() = GradientDrawable().apply {
-        shape = GradientDrawable.OVAL
-        setColor(Color.rgb(68, 87, 125))
-    }
-
-    private fun rounded(color: Int, radius: Int) = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = radius.toFloat()
-    }
-
     private fun statusBarHeight(): Int {
-        val id = context.resources.getIdentifier("status_bar_height", "dimen", "android")
-        return if (id > 0) context.resources.getDimensionPixelSize(id) else dp(24)
+        val id = uiContext.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) uiContext.resources.getDimensionPixelSize(id) else dp(24)
     }
 
-    private fun dp(value: Int): Int = (value * context.resources.displayMetrics.density).toInt()
+    private fun dp(value: Int): Int = (value * uiContext.resources.displayMetrics.density).toInt()
 }

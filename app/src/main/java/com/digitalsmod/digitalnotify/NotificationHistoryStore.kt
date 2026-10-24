@@ -19,7 +19,7 @@ internal data class HistoryItem(
 }
 
 internal object NotificationHistoryStore {
-    private const val MAX_ITEMS = 25
+    private const val MAX_ITEMS = 30
     private val items = CopyOnWriteArrayList<HistoryItem>()
 
     fun record(data: BannerData) {

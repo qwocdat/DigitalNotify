@@ -10,8 +10,11 @@ import androidx.annotation.RequiresApi
 internal object GlassShaderApi33 {
     fun create(source: String): Shader = RuntimeShader(source)
 
-    fun setResolution(shader: Shader?, width: Float, height: Float) {
-        (shader as? RuntimeShader)?.setFloatUniform("resolution", width, height)
+    fun setResolution(shader: Shader?, width: Float, height: Float, cornerRadius: Float) {
+        (shader as? RuntimeShader)?.apply {
+            setFloatUniform("resolution", width, height)
+            setFloatUniform("cornerRadius", cornerRadius)
+        }
     }
 
     fun setAnimation(shader: Shader?, time: Float, progress: Float) {

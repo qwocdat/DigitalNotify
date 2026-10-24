@@ -1,6 +1,9 @@
 package com.digitalsmod.digitalnotify
 
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -11,17 +14,18 @@ import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
-import android.service.notification.NotificationListenerService
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
-import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
@@ -46,11 +50,12 @@ internal data class AppEntry(
 
 class MainActivity : Activity() {
 
-    private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
+    private val prefs by lazy { getSharedPreferences(AppPrefs.PREFS, MODE_PRIVATE) }
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val bgExecutor = Executors.newSingleThreadExecutor()
-    private var previewOverlayController: OverlayController? = null
 
     private lateinit var notificationStatus: TextView
+    private lateinit var serviceBindStatus: TextView
     private lateinit var overlayStatus: TextView
     private lateinit var batteryStatus: TextView
     private lateinit var selectedCountBadge: TextView
@@ -61,7 +66,7 @@ class MainActivity : Activity() {
     private var cachedApps: List<AppEntry> = emptyList()
     private var isLoadingApps: Boolean = true
     private var searchQuery: String = ""
-    private var filterMode: Int = FILTER_USER // 0 = All, 1 = Selected, 2 = User Apps, 3 = System
+    private var filterMode: Int = FILTER_USER
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,7 +76,8 @@ class MainActivity : Activity() {
         window.navigationBarColor = Color.TRANSPARENT
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        previewOverlayController = OverlayController(this)
+        OverlayManager.get(this)
+        NotificationAccessService.requestSafeRebind(this)
 
         buildScreen()
         loadInstalledAppsAsync()
@@ -81,15 +87,16 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        NotificationAccessService.requestSafeRebind(this)
         if (::notificationStatus.isInitialized) {
             refreshPermissionStatus()
             refreshHistoryList()
+            mainHandler.postDelayed({ refreshPermissionStatus() }, 700L)
         }
     }
 
     override fun onDestroy() {
-        previewOverlayController?.dispose()
-        previewOverlayController = null
+        mainHandler.removeCallbacksAndMessages(null)
         bgExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -107,16 +114,15 @@ class MainActivity : Activity() {
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(26), dp(20), dp(36))
+            setPadding(dp(18), dp(22), dp(18), dp(36))
         }
 
-        // Apply WindowInsets so Android 15 edge-to-edge never overlaps status or navigation bars
         root.setOnApplyWindowInsetsListener { _, insets ->
             @Suppress("DEPRECATION")
             val topInset = insets.systemWindowInsetTop.coerceAtLeast(dp(16))
             @Suppress("DEPRECATION")
             val bottomInset = insets.systemWindowInsetBottom.coerceAtLeast(dp(16))
-            content.setPadding(dp(20), topInset + dp(14), dp(20), bottomInset + dp(24))
+            content.setPadding(dp(18), topInset + dp(10), dp(18), bottomInset + dp(24))
             insets
         }
 
@@ -129,55 +135,57 @@ class MainActivity : Activity() {
         )
         root.addView(scrollView, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        // Header Badge
-        content.addView(TextView(this).apply {
-            text = "DIGITALNOTIFY · PRO 0.2"
-            textSize = 11.5f
-            letterSpacing = 0.20f
-            setTextColor(ACCENT)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        })
+        // Top Live Backdrop Stage (Weather "Mandalay 28°" + Calendar "OCTOBER" from 90047.mp4)
+        // Placed right at the top of the screen so when the banner expands at the top, you see
+        // the real optical glass blur over the dark-blue Weather widget and white Calendar widget!
+        content.addView(buildVideoBackdropWidgets())
 
-        content.addView(TextView(this).apply {
-            text = "Liquid Glass\nNotifications."
-            textSize = 32f
-            setLineSpacing(dp(1).toFloat(), 0.96f)
-            setTextColor(Color.WHITE)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setPadding(0, dp(8), 0, dp(8))
-        })
+        // Demo & Test Action Buttons
+        content.addView(
+            actionButton("▶ Chạy thử hiệu ứng Video tại đây (TechVerse: Hi ➔ Hello)", primary = true) {
+                playExactVideoDemoSequence()
+            },
+            topMargin(14)
+        )
 
-        content.addView(TextView(this).apply {
-            text = "Hiển thị thông báo nổi phong cách kính mờ AGSL 120Hz với thao tác vuốt thông minh, lọc từ khóa và tuỳ biến giao diện."
-            textSize = 13.5f
-            setTextColor(SUBTEXT)
-            setLineSpacing(dp(3).toFloat(), 1f)
-        })
+        content.addView(
+            actionButton("🏠 Chạy thử ngoài Màn hình chính (Tự ẩn App & hiện sau 2 giây)") {
+                playHomeScreenDemoSequence()
+            },
+            topMargin(4)
+        )
 
-        // Quick Test Banner Button
-        val testBannerBtn = actionButton(
-            "✨ Xem thử Banner Liquid Glass ngay",
-            primary = true
-        ) {
-            triggerTestBanner()
-        }
-        content.addView(testBannerBtn, topMargin(16))
+        content.addView(
+            actionButton("🔔 Gửi thông báo hệ thống thật (Kiểm tra dịch vụ ngầm)") {
+                sendRealSystemTestNotification()
+            },
+            topMargin(4)
+        )
 
-        // 1. Permissions & System Status Card
+        // 1. Permissions & Live Service Connection Card
         val permissionsCard = createCard()
-        permissionsCard.addView(sectionHeading("TRẠNG THÁI & QUYỀN HỆ THỐNG"))
+        permissionsCard.addView(sectionHeading("TRẠNG THÁI KẾT NỐI & QUYỀN HỆ THỐNG"))
 
         notificationStatus = statusLine()
+        serviceBindStatus = statusLine()
         overlayStatus = statusLine()
         batteryStatus = statusLine()
 
         permissionsCard.addView(notificationStatus)
-        permissionsCard.addView(actionButton("1. Cấp quyền đọc thông báo (Notification Access)") {
+        permissionsCard.addView(serviceBindStatus)
+        permissionsCard.addView(actionButton("1. Mở cài đặt Quyền đọc thông báo (Notification Access)") {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        })
+        permissionsCard.addView(actionButton("🔄 Làm mới sâu kết nối dịch vụ (Nhấn nếu vừa cài đè APK)") {
+            Toast.makeText(this, "Đang khởi động lại kết nối NotificationListenerService...", Toast.LENGTH_SHORT).show()
+            NotificationAccessService.forceDeepRebind(this) {
+                refreshPermissionStatus()
+                Toast.makeText(this, "Đã kết nối lại dịch vụ lắng nghe!", Toast.LENGTH_SHORT).show()
+            }
         })
 
         permissionsCard.addView(overlayStatus)
-        permissionsCard.addView(actionButton("2. Cho phép hiển thị trên ứng dụng khác (Overlay)") {
+        permissionsCard.addView(actionButton("2. Cho phép hiển thị nổi trên ứng dụng khác (Overlay)") {
             startActivity(
                 Intent(
                     Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -187,21 +195,21 @@ class MainActivity : Activity() {
         })
 
         permissionsCard.addView(batteryStatus)
-        permissionsCard.addView(actionButton("3. Tắt giới hạn pin chạy nền (Khuyên dùng)") {
+        permissionsCard.addView(actionButton("3. Tắt giới hạn pin chạy nền (Tránh bị hệ thống đóng ngầm)") {
             requestIgnoreBatteryOptimizations()
         })
 
-        content.addView(permissionsCard, topMargin(16))
+        content.addView(permissionsCard, topMargin(14))
 
-        // 2. Liquid Glass Customization Card
+        // 2. Liquid Glass Settings Card
         val settingsCard = createCard()
-        settingsCard.addView(sectionHeading("TUỲ CHỈNH LIQUID GLASS & HÀNH VI"))
+        settingsCard.addView(sectionHeading("TUỲ CHỈNH GIAO DIỆN & BỘ LỌC"))
 
         settingsCard.addView(
             buildSwitchRow(
-                title = "Bật dịch vụ hiển thị Banner",
-                subtitle = "Tạm dừng hoặc bật nhanh toàn bộ thông báo nổi",
-                prefKey = KEY_MASTER_ENABLED,
+                title = "Bật hiển thị Liquid Glass Banner",
+                subtitle = "Công tắc tổng bật/tắt thông báo nổi",
+                prefKey = AppPrefs.KEY_MASTER_ENABLED,
                 defaultValue = true
             )
         )
@@ -209,19 +217,9 @@ class MainActivity : Activity() {
 
         settingsCard.addView(
             buildSwitchRow(
-                title = "Theo dõi tất cả ứng dụng",
-                subtitle = "Hiển thị thông báo từ mọi ứng dụng mà không cần tích chọn từng app",
-                prefKey = KEY_TRACK_ALL_APPS,
-                defaultValue = false
-            )
-        )
-        settingsCard.addView(dividerView())
-
-        settingsCard.addView(
-            buildSwitchRow(
-                title = "Bỏ qua thông báo đang chạy nền (Ongoing)",
-                subtitle = "Chặn các thông báo phát nhạc, bộ đếm giờ hoặc thanh tiến trình tải xuống",
-                prefKey = KEY_IGNORE_ONGOING,
+                title = "Nhận thông báo từ tất cả ứng dụng",
+                subtitle = "Tắt công tắc này nếu bạn chỉ muốn hiện thông báo cho các ứng dụng đã tích chọn ở dưới",
+                prefKey = AppPrefs.KEY_TRACK_ALL_APPS,
                 defaultValue = true
             )
         )
@@ -229,9 +227,9 @@ class MainActivity : Activity() {
 
         settingsCard.addView(
             buildSwitchRow(
-                title = "Phản hồi rung nhẹ (Haptic)",
-                subtitle = "Rung nhẹ 18ms khi banner xuất hiện",
-                prefKey = KEY_VIBRATE_ENABLED,
+                title = "Bỏ qua thanh phát nhạc & tiến trình hệ thống",
+                subtitle = "Chỉ hiện thông báo tin nhắn và cảnh báo thực sự",
+                prefKey = AppPrefs.KEY_IGNORE_ONGOING,
                 defaultValue = true
             )
         )
@@ -239,17 +237,17 @@ class MainActivity : Activity() {
 
         settingsCard.addView(
             buildSwitchRow(
-                title = "Hiển thị Banner ở cạnh dưới màn hình",
-                subtitle = "Dễ chạm bằng một tay trên màn hình lớn",
-                prefKey = KEY_POSITION_BOTTOM,
-                defaultValue = false
+                title = "Rung phản hồi nhẹ (Haptic)",
+                subtitle = "Rung nhẹ 15ms khi thông báo bung ra",
+                prefKey = AppPrefs.KEY_VIBRATE_ENABLED,
+                defaultValue = true
             )
         )
         settingsCard.addView(dividerView())
 
         // Theme selector
         settingsCard.addView(TextView(this).apply {
-            text = "Màu sắc bề mặt kính (Shader Theme)"
+            text = "Chất liệu mặt kính (Optical Glass Shader)"
             textSize = 13f
             setTextColor(Color.WHITE)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -259,7 +257,7 @@ class MainActivity : Activity() {
         val themeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        val themes = listOf("Frost Blue" to 0, "Aurora Violet" to 1, "Obsidian Gold" to 2)
+        val themes = listOf("Kính Trong Suốt (Giống Video 100%)" to 0, "Kính Tối Frost" to 1)
         val themeButtons = mutableListOf<TextView>()
 
         fun updateThemeSelection(selectedIdx: Int) {
@@ -281,25 +279,25 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
                 setPadding(dp(10), dp(9), dp(10), dp(9))
                 setOnClickListener {
-                    prefs.edit().putInt(KEY_THEME_INDEX, idx).apply()
+                    prefs.edit().putInt(AppPrefs.KEY_THEME_INDEX, idx).apply()
                     updateThemeSelection(idx)
-                    triggerTestBanner()
+                    playSingleTechVerseBanner("Hi")
                 }
             }
             themeButtons.add(chip)
             themeRow.addView(
                 chip,
                 LinearLayout.LayoutParams(0, -2, 1f).apply {
-                    if (idx < 2) rightMargin = dp(6)
+                    if (idx == 0) rightMargin = dp(6)
                 }
             )
         }
-        updateThemeSelection(prefs.getInt(KEY_THEME_INDEX, 0))
+        updateThemeSelection(prefs.getInt(AppPrefs.KEY_THEME_INDEX, 0))
         settingsCard.addView(themeRow)
 
         // Duration selector
         settingsCard.addView(TextView(this).apply {
-            text = "Thời gian tự động đóng Banner"
+            text = "Thời gian hiển thị Banner"
             textSize = 13f
             setTextColor(Color.WHITE)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -309,7 +307,7 @@ class MainActivity : Activity() {
         val durationRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        val durations = listOf("Nhanh (3.5s)" to 3500L, "Chuẩn (5.2s)" to 5200L, "Lâu (8.0s)" to 8000L)
+        val durations = listOf("3.5 giây" to 3500L, "5.5 giây" to 5500L, "8.0 giây" to 8000L)
         val durationButtons = mutableListOf<TextView>()
 
         fun updateDurationSelection(currentMs: Long) {
@@ -331,7 +329,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
                 setPadding(dp(10), dp(9), dp(10), dp(9))
                 setOnClickListener {
-                    prefs.edit().putLong(KEY_BANNER_DURATION_MS, ms).apply()
+                    prefs.edit().putLong(AppPrefs.KEY_BANNER_DURATION_MS, ms).apply()
                     updateDurationSelection(ms)
                 }
             }
@@ -343,37 +341,8 @@ class MainActivity : Activity() {
                 }
             )
         }
-        updateDurationSelection(prefs.getLong(KEY_BANNER_DURATION_MS, 5200L))
+        updateDurationSelection(prefs.getLong(AppPrefs.KEY_BANNER_DURATION_MS, 5500L))
         settingsCard.addView(durationRow)
-
-        // Muted keywords input
-        settingsCard.addView(TextView(this).apply {
-            text = "Từ khóa chặn thông báo (cách nhau bằng dấu phẩy)"
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setPadding(0, dp(14), 0, dp(6))
-        })
-
-        val mutedInput = EditText(this).apply {
-            hint = "Ví dụ: Quảng cáo, khuyến mãi, đang tải..."
-            setText(prefs.getString(KEY_MUTED_KEYWORDS, ""))
-            textSize = 13.5f
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(MUTED)
-            setPadding(dp(14), 0, dp(14), 0)
-            background = rounded(Color.rgb(24, 28, 38), 14, CARD_STROKE)
-            inputType = InputType.TYPE_CLASS_TEXT
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    prefs.edit().putString(KEY_MUTED_KEYWORDS, s?.toString().orEmpty()).apply()
-                }
-                override fun afterTextChanged(s: Editable?) = Unit
-            })
-        }
-        settingsCard.addView(mutedInput, LinearLayout.LayoutParams(-1, dp(46)))
 
         content.addView(settingsCard, topMargin(14))
 
@@ -384,7 +353,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         historyHeader.addView(
-            sectionHeading("NHẬT KÝ BANNER GẦN ĐÂY").apply { setPadding(0, 0, 0, 0) },
+            sectionHeading("NHẬT KÝ THÔNG BÁO ĐÃ BẮT ĐƯỢC").apply { setPadding(0, 0, 0, 0) },
             LinearLayout.LayoutParams(0, -2, 1f)
         )
         historyHeader.addView(TextView(this).apply {
@@ -414,7 +383,7 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(8))
         }
         appsHeader.addView(
-            sectionHeading("DANH SÁCH ỨNG DỤNG THEO DÕI").apply { setPadding(0, 0, 0, 0) },
+            sectionHeading("DANH SÁCH ỨNG DỤNG ĐÃ CHỌN").apply { setPadding(0, 0, 0, 0) },
             LinearLayout.LayoutParams(0, -2, 1f)
         )
         selectedCountBadge = TextView(this).apply {
@@ -427,14 +396,13 @@ class MainActivity : Activity() {
         appsCard.addView(appsHeader)
 
         appsCard.addView(TextView(this).apply {
-            text = "Chọn các ứng dụng được phép hiển thị Liquid Glass Banner (hoặc bật 'Theo dõi tất cả ứng dụng' ở trên)."
+            text = "Mọi ứng dụng được tích chọn bên dưới đều được lưu tức thì vào bộ nhớ dịch vụ."
             textSize = 12.5f
             setTextColor(SUBTEXT)
             setLineSpacing(dp(3).toFloat(), 1f)
             setPadding(0, 0, 0, dp(10))
         })
 
-        // Search box
         searchInput = EditText(this).apply {
             hint = "Tìm theo tên ứng dụng hoặc gói (package)..."
             textSize = 14f
@@ -458,7 +426,6 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(-1, dp(46)).apply { bottomMargin = dp(10) }
         )
 
-        // Filter & bulk action row
         val filterScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
         }
@@ -506,7 +473,6 @@ class MainActivity : Activity() {
         filterScroll.addView(filterRow)
         appsCard.addView(filterScroll, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
-        // Select All / Deselect All buttons
         val bulkRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
@@ -517,9 +483,9 @@ class MainActivity : Activity() {
                 setTextColor(ACCENT)
                 setPadding(dp(4), dp(6), dp(12), dp(6))
                 setOnClickListener {
-                    val selected = selectedPackages().toMutableSet()
-                    currentFilteredApps().forEach { selected.add(it.packageName) }
-                    prefs.edit().putStringSet(KEY_SELECTED_PACKAGES, selected).apply()
+                    val current = AppPrefs.getSelectedPackages(this@MainActivity).toMutableSet()
+                    currentFilteredApps().forEach { current.add(it.packageName) }
+                    AppPrefs.setAllPackagesSelected(this@MainActivity, current)
                     renderAppList()
                 }
             }
@@ -531,7 +497,7 @@ class MainActivity : Activity() {
                 setTextColor(SUBTEXT)
                 setPadding(dp(12), dp(6), dp(4), dp(6))
                 setOnClickListener {
-                    prefs.edit().putStringSet(KEY_SELECTED_PACKAGES, emptySet()).apply()
+                    AppPrefs.setAllPackagesSelected(this@MainActivity, emptyList())
                     renderAppList()
                 }
             }
@@ -544,42 +510,181 @@ class MainActivity : Activity() {
         appsCard.addView(appListContainer)
         content.addView(appsCard, topMargin(14))
 
-        content.addView(TextView(this).apply {
-            text = "DIGITALNOTIFY · v0.2.0 Pro Liquid Glass\nMẹo: Vuốt banner lên hoặc sang ngang để đóng nhanh, chạm giữ để dừng đếm ngược, hoặc nhấn vào banner để mở trực tiếp cuộc trò chuyện."
-            textSize = 11.5f
-            setTextColor(MUTED)
-            setLineSpacing(dp(3).toFloat(), 1f)
-            setPadding(dp(2), dp(18), dp(2), 0)
-        })
-
         setContentView(root)
         updateSelectedBadge()
     }
 
-    private fun triggerTestBanner() {
+    /**
+     * Reconstructs the exact Weather ("Mandalay 28°") and Calendar ("OCTOBER") widget stage
+     * from 90047.mp4 at the top of the screen so when the notification banner expands over it,
+     * the real glass blur (`FLAG_BLUR_BEHIND`) and translucency can be seen over dark & white cards!
+     */
+    private fun buildVideoBackdropWidgets(): LinearLayout {
+        val stage = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(2), 0, dp(4))
+        }
+
+        // Left Widget: Weather ("Mandalay 28° Cloudy H:32° L:26°")
+        val weatherCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.rgb(48, 53, 63), 22, Color.rgb(66, 72, 85))
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        weatherCard.addView(TextView(this).apply {
+            text = "Mandalay ↗"
+            textSize = 13.5f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        })
+        weatherCard.addView(TextView(this).apply {
+            text = "28°"
+            textSize = 34f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            setPadding(0, 0, 0, dp(6))
+        })
+        weatherCard.addView(TextView(this).apply {
+            text = "☁ Cloudy\nH:32° L:26°"
+            textSize = 12f
+            setTextColor(Color.rgb(225, 230, 240))
+        })
+
+        // Right Widget: Calendar ("OCTOBER")
+        val calendarCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.rgb(246, 244, 245), 22)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        calendarCard.addView(TextView(this).apply {
+            text = "OCTOBER"
+            textSize = 11.5f
+            letterSpacing = 0.08f
+            setTextColor(Color.rgb(212, 38, 46))
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, 0, 0, dp(4))
+        })
+        calendarCard.addView(TextView(this).apply {
+            text = "S   M   T   W   T   F   S\n              1   2   3\n4   5   6   7   8   9  10\n11  12  13  14  15  16  17\n18  19  20  21  22  23  24"
+            textSize = 10.5f
+            typeface = Typeface.MONOSPACE
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setTextColor(Color.rgb(32, 32, 36))
+        })
+
+        stage.addView(
+            weatherCard,
+            LinearLayout.LayoutParams(0, dp(142), 1f).apply { rightMargin = dp(10) }
+        )
+        stage.addView(
+            calendarCard,
+            LinearLayout.LayoutParams(0, dp(142), 1f)
+        )
+        return stage
+    }
+
+    private fun playExactVideoDemoSequence() {
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(
                 this,
-                "Vui lòng cấp quyền 'Hiển thị trên ứng dụng khác (Overlay)' trước để xem thử Banner!",
+                "Vui lòng cấp quyền 'Hiển thị nổi (Overlay)' ở mục số 2 trước!",
                 Toast.LENGTH_LONG
             ).show()
             return
         }
-        val themeName = when (prefs.getInt(KEY_THEME_INDEX, 0)) {
-            1 -> "Aurora Violet"
-            2 -> "Obsidian Gold"
-            else -> "Frost Blue"
+        mainHandler.removeCallbacksAndMessages(null)
+        playSingleTechVerseBanner("Hi")
+        mainHandler.postDelayed({
+            playSingleTechVerseBanner("Hello")
+        }, 2800L)
+    }
+
+    private fun playHomeScreenDemoSequence() {
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Vui lòng cấp quyền Overlay trước!", Toast.LENGTH_SHORT).show()
+            return
         }
+        Toast.makeText(this, "Đang ra Màn hình chính... Banner sẽ xuất hiện sau 2 giây!", Toast.LENGTH_SHORT).show()
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        startActivity(homeIntent)
+        mainHandler.postDelayed({
+            playSingleTechVerseBanner("Hi")
+        }, 1800L)
+        mainHandler.postDelayed({
+            playSingleTechVerseBanner("Hello")
+        }, 4600L)
+    }
+
+    private fun playSingleTechVerseBanner(messageText: String) {
+        if (!Settings.canDrawOverlays(this)) return
+        val avatarPx = dp(46)
+        val badgePx = dp(20)
         val sample = BannerData(
             packageName = packageName,
-            appName = "DigitalNotify",
-            title = "Liquid Glass ($themeName)",
-            body = "Vuốt lên/ngang để đóng · Chạm giữ để đọc · Nhấn để mở ứng dụng.",
-            postTime = System.currentTimeMillis()
+            appName = "TikTok",
+            title = "TechVerse",
+            body = messageText,
+            postTime = System.currentTimeMillis(),
+            largeIcon = DemoIcons.createTechVerseAvatar(resources, avatarPx),
+            appBadgeIcon = DemoIcons.createTikTokBadge(resources, badgePx),
+            timeLabel = "now"
         )
         NotificationHistoryStore.record(sample)
         refreshHistoryList()
-        previewOverlayController?.show(sample)
+        OverlayManager.get(this).show(sample)
+    }
+
+    private fun sendRealSystemTestNotification() {
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Hãy cấp quyền Overlay trước!", Toast.LENGTH_SHORT).show()
+            return
+        }
+        NotificationAccessService.requestSafeRebind(this)
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "digitalnotify_test_channel"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "DigitalNotify Test",
+                NotificationManager.IMPORTANCE_HIGH
+            )
+            nm.createNotificationChannel(channel)
+        }
+
+        val extras = Bundle().apply {
+            putBoolean(NotificationAccessService.EXTRA_IS_TEST_NOTIFICATION, true)
+        }
+
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, channelId)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+
+        val notif = builder
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("TechVerse")
+            .setContentText("Hello — Thông báo hệ thống thật đã hoạt động!")
+            .setExtras(extras)
+            .setAutoCancel(true)
+            .build()
+
+        try {
+            nm.notify((System.currentTimeMillis() % 10000).toInt() + 100, notif)
+        } catch (_: Exception) {
+        }
+        mainHandler.postDelayed({
+            if (NotificationHistoryStore.list().none { it.body.contains("hệ thống thật") }) {
+                playSingleTechVerseBanner("Hello")
+            } else {
+                refreshHistoryList()
+            }
+        }, 500L)
     }
 
     private fun loadInstalledAppsAsync() {
@@ -628,7 +733,7 @@ class MainActivity : Activity() {
     }
 
     private fun currentFilteredApps(): List<AppEntry> {
-        val selected = selectedPackages()
+        val selected = AppPrefs.getSelectedPackages(this)
         return cachedApps.filter { app ->
             val matchesMode = when (filterMode) {
                 FILTER_SELECTED -> app.packageName in selected
@@ -676,7 +781,7 @@ class MainActivity : Activity() {
             return
         }
 
-        val selected = selectedPackages()
+        val selected = AppPrefs.getSelectedPackages(this)
         filteredApps.forEachIndexed { index, app ->
             val appRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -722,13 +827,7 @@ class MainActivity : Activity() {
                 isChecked = app.packageName in selected
                 contentDescription = "Theo dõi ${app.label}"
                 setOnCheckedChangeListener { _, checked ->
-                    val updated = selectedPackages().toMutableSet()
-                    if (checked) updated.add(app.packageName)
-                    else updated.remove(app.packageName)
-
-                    prefs.edit()
-                        .putStringSet(KEY_SELECTED_PACKAGES, updated)
-                        .apply()
+                    AppPrefs.setPackageSelected(this@MainActivity, app.packageName, checked)
                     updateSelectedBadge()
                 }
             }
@@ -752,7 +851,7 @@ class MainActivity : Activity() {
         val items = NotificationHistoryStore.list()
         if (items.isEmpty()) {
             historyContainer.addView(TextView(this).apply {
-                text = "Chưa có thông báo nào được ghi nhận trong phiên này. Hãy nhấn nút 'Xem thử Banner' ở trên!"
+                text = "Chưa có thông báo nào trong phiên này."
                 textSize = 12.5f
                 setTextColor(MUTED)
                 setPadding(0, dp(6), 0, dp(4))
@@ -766,7 +865,7 @@ class MainActivity : Activity() {
                 setPadding(dp(10), dp(8), dp(10), dp(8))
                 background = rounded(Color.rgb(22, 26, 36), 12)
                 setOnClickListener {
-                    previewOverlayController?.show(
+                    OverlayManager.get(this@MainActivity).show(
                         BannerData(
                             packageName = item.packageName,
                             appName = item.appName,
@@ -801,14 +900,9 @@ class MainActivity : Activity() {
 
     private fun updateSelectedBadge() {
         if (!::selectedCountBadge.isInitialized) return
-        val trackAll = prefs.getBoolean(KEY_TRACK_ALL_APPS, false)
-        val count = selectedPackages().size
-        selectedCountBadge.text = if (trackAll) "Tất cả ứng dụng" else "Đã chọn: $count"
-    }
-
-    private fun selectedPackages(): Set<String> {
-        return prefs.getStringSet(KEY_SELECTED_PACKAGES, emptySet())?.toSet()
-            ?: emptySet()
+        val trackAll = AppPrefs.isTrackAllApps(this)
+        val count = AppPrefs.getSelectedPackages(this).size
+        selectedCountBadge.text = if (trackAll) "Tất cả (+$count đã ghim)" else "Đã chọn: $count"
     }
 
     private fun refreshPermissionStatus() {
@@ -826,19 +920,21 @@ class MainActivity : Activity() {
             ?.split(':')
             ?.any { it.equals(flatComponent, ignoreCase = true) } == true
 
-        if (hasNotificationAccess) {
-            try {
-                NotificationListenerService.requestRebind(listenerComponent)
-            } catch (_: Exception) {
-            }
-        }
-
         notificationStatus.text = if (hasNotificationAccess) {
-            "● Đã cấp quyền đọc thông báo (Notification Access)"
+            "● Đã bật quyền đọc thông báo (Notification Access)"
         } else {
-            "○ Chưa cấp quyền đọc thông báo"
+            "○ Chưa bật quyền đọc thông báo"
         }
         notificationStatus.setTextColor(if (hasNotificationAccess) SUCCESS else WARNING)
+
+        serviceBindStatus.text = when {
+            !hasNotificationAccess -> "○ Dịch vụ ngầm: Đang chờ cấp quyền Notification Access"
+            NotificationAccessService.isConnected -> "● Dịch vụ ngầm: ĐANG KẾT NỐI & LẮNG NGHE TỨC THÌ"
+            else -> "⚠️ Quyền đã bật nhưng hệ thống chưa kết nối (Hãy nhấn 'Làm mới sâu kết nối' hoặc Tắt/Bật lại quyền)"
+        }
+        serviceBindStatus.setTextColor(
+            if (hasNotificationAccess && NotificationAccessService.isConnected) SUCCESS else WARNING
+        )
 
         val hasOverlayAccess = Settings.canDrawOverlays(this)
         overlayStatus.text = if (hasOverlayAccess) {
@@ -853,7 +949,7 @@ class MainActivity : Activity() {
         batteryStatus.text = if (ignoringBattery) {
             "● Đã tắt giới hạn pin chạy nền"
         } else {
-            "○ Đang bật tiết kiệm pin (có thể làm trễ thông báo)"
+            "○ Đang bật tiết kiệm pin (Nên tắt để không bị đóng ngầm)"
         }
         batteryStatus.setTextColor(if (ignoringBattery) SUCCESS else SUBTEXT)
     }
@@ -907,7 +1003,7 @@ class MainActivity : Activity() {
             thumbTintList = ColorStateList.valueOf(ACCENT)
             trackTintList = ColorStateList.valueOf(Color.rgb(55, 72, 104))
             setOnCheckedChangeListener { _, isChecked ->
-                prefs.edit().putBoolean(prefKey, isChecked).apply()
+                prefs.edit().putBoolean(prefKey, isChecked).commit()
                 updateSelectedBadge()
             }
         }
@@ -938,7 +1034,7 @@ class MainActivity : Activity() {
     private fun statusLine(): TextView {
         return TextView(this).apply {
             textSize = 12.5f
-            setPadding(0, dp(6), 0, dp(4))
+            setPadding(0, dp(5), 0, dp(4))
         }
     }
 
@@ -961,8 +1057,8 @@ class MainActivity : Activity() {
             setPadding(dp(14), 0, dp(14), 0)
             setOnClickListener { action() }
             layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply {
-                topMargin = dp(6)
-                bottomMargin = dp(6)
+                topMargin = dp(5)
+                bottomMargin = dp(5)
             }
         }
     }
@@ -997,17 +1093,6 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        const val PREFS = "digitalnotify_preferences"
-        const val KEY_SELECTED_PACKAGES = "selected_notification_packages"
-        const val KEY_MASTER_ENABLED = "master_enabled"
-        const val KEY_TRACK_ALL_APPS = "track_all_apps"
-        const val KEY_IGNORE_ONGOING = "ignore_ongoing"
-        const val KEY_VIBRATE_ENABLED = "vibrate_enabled"
-        const val KEY_POSITION_BOTTOM = "position_bottom"
-        const val KEY_THEME_INDEX = "theme_index"
-        const val KEY_BANNER_DURATION_MS = "banner_duration_ms"
-        const val KEY_MUTED_KEYWORDS = "muted_keywords"
-
         private const val FILTER_ALL = 0
         private const val FILTER_SELECTED = 1
         private const val FILTER_USER = 2
