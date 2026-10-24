@@ -41,8 +41,6 @@ jobs:
           if [ -n "$SDKMANAGER" ]; then
             yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
             "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-          else
-            echo "Warning: sdkmanager not found in $SDK_ROOT, relying on AGP auto-download"
           fi
 
       - name: Set up Gradle 8.9
