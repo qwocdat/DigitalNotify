@@ -1,40 +1,18 @@
-# DigitalNotify v0.2.0 (Pro Liquid Glass Edition)
+# DigitalNotify v0.5.0 (iOS 27 Liquid Glass Edition)
 
-Ứng dụng Android hiển thị thông báo nổi phong cách **Liquid Glass (AGSL Shader)** tốc độ cao, đã được **sửa lỗi build CI/Gradle** và **nâng cấp toàn diện**.
+## Các cập nhật trong bản v0.5.0
 
-## Các điểm đã sửa lỗi Build (Fix Build)
-
-1. **GitHub Actions CI (`.github/workflows/build-apk.yml`)**:
-   - Loại bỏ phụ thuộc vào `android-actions/setup-android@v3` (thường gây lỗi `sdkmanager` / lệch biến môi trường `ANDROID_HOME` trên runner `ubuntu-latest`).
-   - Sử dụng trực tiếp Android SDK có sẵn trên GitHub runner, tự động chấp nhận license (`sdkmanager --licenses`) và cài đặt `platforms;android-35`, `build-tools;35.0.0`.
-   - Tự động nhận diện thư mục chứa `settings.gradle.kts` dù người dùng giải nén ở thư mục gốc hay thư mục con.
-   - Tự động build cả **Debug APK** và **Release APK** (đã tối ưu R8/shrinkResources và ký sẵn để cài ngay trên điện thoại).
-2. **Cấu hình Gradle & Android Manifest**:
-   - Bổ sung `gradle/wrapper/gradle-wrapper.properties` và `.gitignore` chuẩn Android Studio.
-   - Bổ sung `<queries>` và `tools:ignore="QueryAllPackagesPermission"` trong `AndroidManifest.xml`, cấu hình `lint` trong `app/build.gradle.kts` để không chặn quá trình build Release/Debug.
-   - Sửa lỗi khai báo font `sans-serif` trong `styles.xml` và bổ sung icon vector `@drawable/ic_launcher`.
-
-## Các tính năng nâng cấp mới (v0.2.0)
-
-- **Sửa lỗi hiển thị góc bo & đổ bóng (`GlassBannerView`)**: Thêm `ViewOutlineProvider` chuẩn xác và viền kính inset không bị cắt lẹm; bổ sung 3 chủ đề AGSL Shader (**Frost Blue**, **Aurora Violet**, **Obsidian Gold**).
-- **Cử chỉ cảm ứng thông minh trên Banner (`OverlayController`)**:
-  - **Vuốt lên hoặc vuốt ngang** để đóng nhanh banner.
-  - **Chạm và giữ** để tạm dừng bộ đếm tự đóng khi đang đọc nội dung dài.
-  - **Nhấn vào banner** để mở trực tiếp màn hình/cuộc trò chuyện của thông báo (`PendingIntent` với hỗ trợ Android 14/15 `ActivityOptions`), tự động cập nhật nội dung tại chỗ nếu cùng ứng dụng gửi liên tiếp.
-- **Hiển thị Avatar / Large Icon & Rung Haptic**: Tự động hiển thị ảnh đại diện người gửi (nếu có trong thông báo) và phản hồi rung nhẹ 18ms.
-- **Bộ lọc nâng cao (`NotificationAccessService`)**:
-  - Công tắc **Bật/Tắt nhanh** toàn bộ dịch vụ.
-  - Tuỳ chọn **Theo dõi tất cả ứng dụng** hoặc chỉ các ứng dụng được chọn.
-  - Tự động **bỏ qua thông báo đang chạy nền (Ongoing)** như trình phát nhạc, thanh tải xuống.
-  - **Chặn theo từ khóa (Muted Keywords)**.
-- **Giao diện `MainActivity` mới mượt mà**:
-  - Tải danh sách ứng dụng **bất đồng bộ (Background Thread)** và lưu đệm icon/tên ứng dụng, loại bỏ hoàn toàn hiện tượng giật lag khi tìm kiếm.
-  - Nút **Xem thử Banner Liquid Glass ngay** để kiểm tra hiệu ứng tức thì.
-  - **Nhật ký thông báo gần đây** (cho phép nhấn để phát lại banner).
-  - Hỗ trợ **Edge-to-Edge WindowInsets** chuẩn Android 15 (SDK 35) và lối tắt tắt tối ưu hoá pin chạy nền.
-
-## Hướng dẫn Build trên GitHub Actions
-
-1. Tạo repository mới trên GitHub và tải toàn bộ các file trong bản zip này lên repository.
-2. Mở tab **Actions** -> chọn workflow **Build DigitalNotify APK** -> nhấn **Run workflow**.
-3. Sau khi chạy xong (khoảng 1–2 phút), tải file `DigitalNotify-debug-apk` hoặc `DigitalNotify-release-apk` về điện thoại và cài đặt.
+1. **Sửa triệt để lỗi làm mờ màn hình xung quanh**:
+   - Đã gỡ bỏ `FLAG_BLUR_BEHIND` trên cửa sổ `WindowManager.LayoutParams`. Màn hình chính và các biểu tượng xung quanh giữ nguyên độ sắc nét 100%, chỉ riêng bên trong tấm thẻ thông báo có hiệu ứng kính lỏng AGSL.
+2. **Sửa triệt để lỗi tự lặp thông báo *"DigitalNotify đang hiện trên các ứng dụng khác"***:
+   - Chặn hoàn toàn các gói hệ thống (`"android"`, `"com.android.systemui"`) và bất kỳ thông báo hệ thống nào nhắc tới `"DigitalNotify"`.
+   - Xoá thông báo chạy ngầm của chính ứng dụng.
+3. **Xoá bỏ tiện ích Lịch & Thời tiết và làm mới toàn bộ giao diện iOS 27 cho người dùng**:
+   - Giao diện hoàn toàn dành cho người dùng cuối, không còn thuật ngữ lập trình viên.
+   - Bổ sung **LiquidGlassButton** và **LiquidGlassSwitch**: khi nhấn hoặc giữ để kéo, nút biến thành dạng thủy tinh lỏng với ánh sáng khúc xạ chạy theo ngón tay và co giãn đàn hồi.
+4. **Luồng Onboarding iOS 27 mới**:
+   - Chọn ngôn ngữ (Tiếng Việt / English).
+   - Hướng dẫn cấp quyền & nút xác nhận điều kiện tối ưu (tắt thông báo nổi mặc định của các app đã chọn).
+   - Màn hình ủng hộ Admin: nút mở TikTok **`https://www.tiktok.com/@digitalxiaoiu5`** để Follow & Tim video. Khi chuyển sang TikTok rồi quay lại, ứng dụng tự động mở khoá vào màn hình chính.
+5. **Chế độ thay thế thông báo gốc (`Auto-Suppress`)**:
+   - Tự động thu hồi thông báo nổi mặc định của ứng dụng khác ngay khi DigitalNotify bắt được tin nhắn, giúp chỉ hiển thị duy nhất thanh thông báo kính lỏng iOS 27.
