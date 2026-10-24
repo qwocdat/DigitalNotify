@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 permissions:
   contents: read
@@ -12,7 +14,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -21,33 +23,58 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Set up Android SDK & Accept Licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          SDKMANAGER=""
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER=$(find "$SDK_ROOT" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)
+          fi
+
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          else
+            echo "Warning: sdkmanager not found in $SDK_ROOT, relying on AGP auto-download"
+          fi
+
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      # Explicit packages override setup-android's legacy default "tools" package.
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
-          accept-android-sdk-licenses: true
-
-      - name: Verify Android SDK
+      - name: Build Debug & Release APKs
         shell: bash
         run: |
           set -euo pipefail
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          test -d "$ANDROID_HOME/platforms/android-35"
-          test -d "$ANDROID_HOME/build-tools/35.0.0"
-          adb version
+          PROJECT_DIR="."
+          if [ ! -f "settings.gradle.kts" ]; then
+            FOUND=$(find . -maxdepth 3 -name "settings.gradle.kts" | head -n 1 || true)
+            if [ -n "$FOUND" ]; then
+              PROJECT_DIR=$(dirname "$FOUND")
+            fi
+          fi
+          echo "Building project in: $PROJECT_DIR"
+          cd "$PROJECT_DIR"
+          gradle --no-daemon assembleDebug assembleRelease --stacktrace
 
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
-
-      - name: Upload APK
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: DigitalNotify-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: '**/app/build/outputs/apk/debug/*.apk'
           if-no-files-found: error
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DigitalNotify-release-apk
+          path: '**/app/build/outputs/apk/release/*.apk'
+          if-no-files-found: ignore
