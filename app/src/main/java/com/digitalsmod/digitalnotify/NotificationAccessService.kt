@@ -1,13 +1,9 @@
 package com.digitalsmod.digitalnotify
 
 import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
-import android.content.pm.ServiceInfo
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -23,13 +19,11 @@ class NotificationAccessService : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         OverlayManager.get(this)
-        startSilentKeepAliveForeground()
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         isConnected = true
-        startSilentKeepAliveForeground()
     }
 
     override fun onListenerDisconnected() {
@@ -43,72 +37,25 @@ class NotificationAccessService : NotificationListenerService() {
         }
     }
 
-    private fun startSilentKeepAliveForeground() {
-        try {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-            val channelId = KEEP_ALIVE_CHANNEL_ID
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val channel = NotificationChannel(
-                    channelId,
-                    "DigitalNotify Background Service",
-                    NotificationManager.IMPORTANCE_MIN
-                ).apply {
-                    setShowBadge(false)
-                    enableLights(false)
-                    enableVibration(false)
-                    setSound(null, null)
-                }
-                nm.createNotificationChannel(channel)
-            }
-            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(this, channelId)
-            } else {
-                @Suppress("DEPRECATION")
-                Notification.Builder(this)
-            }
-            val notif = builder
-                .setSmallIcon(android.R.drawable.ic_popup_reminder)
-                .setContentTitle("DigitalNotify đang lắng nghe thông báo")
-                .setContentText("Giữ kết nối ổn định cho hiệu ứng Liquid Glass")
-                .setOngoing(true)
-                .build()
-
-            if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(
-                    KEEP_ALIVE_NOTIFICATION_ID,
-                    notif,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
-            } else {
-                startForeground(KEEP_ALIVE_NOTIFICATION_ID, notif)
-            }
-        } catch (_: Exception) {
-        }
-    }
-
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
         if (sbn == null) return
         isConnected = true
 
+        val pkg = sbn.packageName ?: return
+        // Strictly block our own package and system overlay notifications to prevent infinite loops!
+        if (pkg == packageName || pkg == "android" || pkg == "com.android.systemui") return
+
         val notification = sbn.notification ?: return
         if (!AppPrefs.isMasterEnabled(this)) return
         if (!Settings.canDrawOverlays(this)) return
 
-        // Skip our own silent keep-alive notification, but allow test notifications
-        if (sbn.id == KEEP_ALIVE_NOTIFICATION_ID && sbn.packageName == packageName) return
-        val isSelfTest = sbn.packageName == packageName &&
-            notification.extras?.getBoolean(EXTRA_IS_TEST_NOTIFICATION, false) == true
-        if (sbn.packageName == packageName && !isSelfTest) return
-
-        // Check if this package is allowed (Selected apps, or Track All Apps)
-        if (!isSelfTest && !AppPrefs.isPackageAllowed(this, sbn.packageName)) {
-            return
-        }
+        // Only show notifications for apps selected by the user
+        if (!AppPrefs.isPackageAllowed(this, pkg)) return
 
         val prefs = getSharedPreferences(AppPrefs.PREFS, MODE_PRIVATE)
         val ignoreOngoing = prefs.getBoolean(AppPrefs.KEY_IGNORE_ONGOING, true)
-        if (ignoreOngoing && !isSelfTest) {
+        if (ignoreOngoing) {
             val isOngoingFlag = sbn.isOngoing || (notification.flags and Notification.FLAG_ONGOING_EVENT) != 0
             val isServiceOrMedia = notification.category == Notification.CATEGORY_SERVICE ||
                 notification.category == Notification.CATEGORY_TRANSPORT ||
@@ -121,26 +68,25 @@ class NotificationAccessService : NotificationListenerService() {
         val extras = notification.extras ?: Bundle.EMPTY
         val (rawTitle, rawBody) = extractTitleAndBody(notification, extras)
 
+        // Block any system warning mentioning DigitalNotify or overlay display
+        val combinedText = "$rawTitle $rawBody"
+        if (combinedText.contains("DigitalNotify", ignoreCase = true) ||
+            combinedText.contains("đang hiện trên các ứng dụng", ignoreCase = true) ||
+            combinedText.contains("displaying over other apps", ignoreCase = true)
+        ) {
+            return
+        }
+
         val isGroupSummary = (notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
         if (isGroupSummary && rawTitle.isBlank() && rawBody.isBlank()) {
             return
         }
 
-        // Check muted keywords
-        val mutedRaw = prefs.getString(AppPrefs.KEY_MUTED_KEYWORDS, "").orEmpty()
-        if (mutedRaw.isNotBlank() && !isSelfTest) {
-            val keywords = mutedRaw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
-            val combined = "$rawTitle $rawBody"
-            if (keywords.any { kw -> combined.contains(kw, ignoreCase = true) }) {
-                return
-            }
-        }
-
         val appLabel = try {
-            val info = packageManager.getApplicationInfo(sbn.packageName, 0)
+            val info = packageManager.getApplicationInfo(pkg, 0)
             packageManager.getApplicationLabel(info).toString()
         } catch (_: Exception) {
-            sbn.packageName.substringAfterLast('.')
+            pkg.substringAfterLast('.')
         }
 
         val largeIconDrawable = try {
@@ -150,18 +96,26 @@ class NotificationAccessService : NotificationListenerService() {
         }
 
         val appBadgeDrawable = try {
-            packageManager.getApplicationIcon(sbn.packageName)
+            packageManager.getApplicationIcon(pkg)
         } catch (_: Exception) {
             null
         }
 
         val safeTitle = rawTitle.ifBlank { appLabel }
         val safeBody = rawBody.ifBlank {
-            notification.tickerText?.toString()?.trim().orEmpty().ifBlank { "Thông báo mới" }
+            notification.tickerText?.toString()?.trim().orEmpty().ifBlank { "Tin nhắn mới" }
+        }
+
+        // Auto-suppress original system notification so ONLY DigitalNotify's Liquid Glass banner appears!
+        if (AppPrefs.isSuppressSystemNotif(this) && !sbn.isOngoing) {
+            try {
+                cancelNotification(sbn.key)
+            } catch (_: Exception) {
+            }
         }
 
         val data = BannerData(
-            packageName = sbn.packageName,
+            packageName = pkg,
             appName = appLabel,
             title = safeTitle,
             body = safeBody,
@@ -172,10 +126,6 @@ class NotificationAccessService : NotificationListenerService() {
             timeLabel = "now"
         )
 
-        // Coalesce burst notifications: Android apps often post a Group Summary + Child notification
-        // 10-50ms apart. If a child notification (!isGroupSummary) arrives, dispatch immediately and
-        // cancel any pending summary; if a summary arrives first, wait 75ms in case the child follows.
-        val pkg = sbn.packageName
         if (!isGroupSummary) {
             pendingBursts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
             dispatchBanner(data)
@@ -192,7 +142,6 @@ class NotificationAccessService : NotificationListenerService() {
     }
 
     private fun dispatchBanner(data: BannerData) {
-        NotificationHistoryStore.record(data)
         mainHandler.post {
             OverlayManager.get(this).show(data)
         }
@@ -210,7 +159,6 @@ class NotificationAccessService : NotificationListenerService() {
                 ?: extras.getCharSequence(Notification.EXTRA_TEXT)
             )?.toString()?.trim().orEmpty()
 
-        // Parse MessagingStyle (Messenger, Zalo, Telegram, WhatsApp, TikTok, SMS)
         try {
             @Suppress("DEPRECATION")
             val messages = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
@@ -251,16 +199,9 @@ class NotificationAccessService : NotificationListenerService() {
     }
 
     companion object {
-        const val EXTRA_IS_TEST_NOTIFICATION = "digitalnotify_is_test"
-        private const val KEEP_ALIVE_CHANNEL_ID = "digitalnotify_keepalive"
-        private const val KEEP_ALIVE_NOTIFICATION_ID = 99047
-
         @Volatile
         var isConnected: Boolean = false
 
-        /**
-         * Safely requests rebind WITHOUT synchronously disabling the component.
-         */
         fun requestSafeRebind(context: Context) {
             try {
                 val cn = ComponentName(context, NotificationAccessService::class.java)
@@ -272,36 +213,6 @@ class NotificationAccessService : NotificationListenerService() {
                 NotificationListenerService.requestRebind(cn)
             } catch (_: Exception) {
             }
-        }
-
-        /**
-         * Deep reset with a 650ms async delay between DISABLED and ENABLED, used ONLY when
-         * the user manually taps the "Làm mới kết nối" button.
-         */
-        fun forceDeepRebind(context: Context, onComplete: () -> Unit) {
-            val appCtx = context.applicationContext
-            val cn = ComponentName(appCtx, NotificationAccessService::class.java)
-            val pm = appCtx.packageManager
-            try {
-                pm.setComponentEnabledSetting(
-                    cn,
-                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                    PackageManager.DONT_KILL_APP
-                )
-            } catch (_: Exception) {
-            }
-            Handler(Looper.getMainLooper()).postDelayed({
-                try {
-                    pm.setComponentEnabledSetting(
-                        cn,
-                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                        PackageManager.DONT_KILL_APP
-                    )
-                    NotificationListenerService.requestRebind(cn)
-                } catch (_: Exception) {
-                }
-                onComplete()
-            }, 650L)
         }
     }
 }

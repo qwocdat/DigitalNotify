@@ -8,12 +8,27 @@ internal object AppPrefs {
     const val KEY_SELECTED_PACKAGES = "selected_notification_packages"
     const val KEY_SELECTED_PACKAGES_CSV = "selected_notification_packages_csv"
     const val KEY_MASTER_ENABLED = "master_enabled"
-    const val KEY_TRACK_ALL_APPS = "track_all_apps_v4"
+    const val KEY_SUPPRESS_SYSTEM_NOTIF = "suppress_system_notif"
     const val KEY_IGNORE_ONGOING = "ignore_ongoing"
     const val KEY_VIBRATE_ENABLED = "vibrate_enabled"
     const val KEY_THEME_INDEX = "theme_index"
     const val KEY_BANNER_DURATION_MS = "banner_duration_ms"
-    const val KEY_MUTED_KEYWORDS = "muted_keywords"
+    const val KEY_LANGUAGE = "app_language" // "vi" or "en"
+    const val KEY_ONBOARDING_DONE = "onboarding_done_v5"
+    const val KEY_CONDITION_ACCEPTED = "condition_accepted_v5"
+    const val KEY_TIKTOK_VISITED = "tiktok_visited_v5"
+
+    const val ADMIN_TIKTOK_URL = "https://www.tiktok.com/@digitalxiaoiu5"
+
+    // System packages that must NEVER trigger floating banners (prevents the overlay warning loop!)
+    private val BLOCKED_SYSTEM_PACKAGES = setOf(
+        "android",
+        "com.android.systemui",
+        "com.android.settings",
+        "com.google.android.ext.services",
+        "com.miui.securitycenter",
+        "com.samsung.android.app.cocktailbarservice"
+    )
 
     @Volatile
     private var initialized = false
@@ -71,18 +86,35 @@ internal object AppPrefs {
         return prefs.getBoolean(KEY_MASTER_ENABLED, true)
     }
 
-    fun isTrackAllApps(context: Context): Boolean {
+    fun isSuppressSystemNotif(context: Context): Boolean {
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_TRACK_ALL_APPS, true)
+        return prefs.getBoolean(KEY_SUPPRESS_SYSTEM_NOTIF, true)
     }
 
     fun isPackageAllowed(context: Context, packageName: String): Boolean {
+        if (packageName == context.packageName) return false
+        if (packageName in BLOCKED_SYSTEM_PACKAGES) return false
         ensureLoaded(context)
-        // Always allow if Track All Apps is enabled, OR if the user explicitly checked this app,
-        // OR if no apps have been checked yet!
-        if (memorySelected.contains(packageName)) return true
-        if (isTrackAllApps(context)) return true
-        if (memorySelected.isEmpty()) return true
-        return false
+        return memorySelected.contains(packageName)
+    }
+
+    fun getLang(context: Context): String {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_LANGUAGE, "vi") ?: "vi"
+    }
+
+    fun setLang(context: Context, lang: String) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_LANGUAGE, lang).commit()
+    }
+
+    fun isOnboardingDone(context: Context): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_ONBOARDING_DONE, false)
+    }
+
+    fun setOnboardingDone(context: Context, done: Boolean) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_ONBOARDING_DONE, done).commit()
     }
 }

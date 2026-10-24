@@ -46,7 +46,6 @@ internal object DemoIcons {
         return BitmapDrawable(resources, bmp)
     }
 
-    /** Creates the exact white circular "TechVerse X" avatar from 90047.mp4. */
     fun createTechVerseAvatar(resources: Resources, sizePx: Int): Drawable {
         val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
@@ -80,7 +79,6 @@ internal object DemoIcons {
         return BitmapDrawable(resources, bmp)
     }
 
-    /** Creates the rounded-square TikTok badge icon from 90047.mp4. */
     fun createTikTokBadge(resources: Resources, sizePx: Int): Drawable {
         val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)

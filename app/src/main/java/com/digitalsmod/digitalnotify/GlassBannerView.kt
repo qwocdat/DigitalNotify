@@ -15,16 +15,14 @@ import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 
 /**
- * Real optical Liquid Glass surface matching 90047.mp4:
- * - Strictly premultiplied alpha in AGSL so hardware blur (`FLAG_BLUR_BEHIND`) shines through naturally
- * - Rounded-rectangle SDF (`sdRoundBox`) optical bevel, internal reflection line, and bottom lens caustic
+ * Optical Liquid Glass Banner View (matching 90047.mp4 without blurring the surrounding screen).
  */
 class GlassBannerView(
     context: Context,
     private val themeIndex: Int = 0
 ) : FrameLayout(context) {
 
-    private val strokePx = dp(1.05f)
+    private val strokePx = dp(1.1f)
     val cornerRadiusPx = dp(26f)
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val edgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -88,15 +86,14 @@ class GlassBannerView(
         if (w > 0 && h > 0 && (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || shader == null)) {
             val colors = when (themeIndex) {
                 1 -> intArrayOf(
-                    Color.argb(145, 22, 28, 42),
-                    Color.argb(125, 34, 44, 66),
-                    Color.argb(150, 18, 24, 36)
+                    Color.argb(185, 22, 28, 42),
+                    Color.argb(170, 34, 44, 66),
+                    Color.argb(190, 18, 24, 36)
                 )
                 else -> intArrayOf(
-                    // Translucent frosty glass veil (~44% alpha) so real blurred background passes through
-                    Color.argb(118, 250, 248, 252),
-                    Color.argb(104, 232, 235, 242),
-                    Color.argb(126, 252, 252, 255)
+                    Color.argb(192, 232, 234, 240),
+                    Color.argb(176, 215, 220, 228),
+                    Color.argb(198, 238, 240, 246)
                 )
             }
             fillPaint.shader = LinearGradient(
@@ -116,25 +113,23 @@ class GlassBannerView(
             )
         }
 
-        // Specular diagonal rim gradient (brightest on top-left and bottom-right like real curved glass)
         edgePaint.shader = LinearGradient(
             0f, 0f, w.toFloat(), h.toFloat(),
             intArrayOf(
-                Color.argb(215, 255, 255, 255),
-                Color.argb(110, 230, 238, 255),
-                Color.argb(200, 255, 255, 255)
+                Color.argb(225, 255, 255, 255),
+                Color.argb(120, 230, 238, 255),
+                Color.argb(210, 255, 255, 255)
             ),
             floatArrayOf(0f, 0.5f, 1f),
             Shader.TileMode.CLAMP
         )
 
-        // Subtle inner refractive bevel
         innerBevelPaint.shader = LinearGradient(
             0f, 0f, 0f, h.toFloat(),
             intArrayOf(
-                Color.argb(75, 255, 255, 255),
-                Color.argb(24, 15, 20, 30),
-                Color.argb(95, 255, 255, 255)
+                Color.argb(85, 255, 255, 255),
+                Color.argb(28, 15, 20, 30),
+                Color.argb(105, 255, 255, 255)
             ),
             floatArrayOf(0f, 0.5f, 1f),
             Shader.TileMode.CLAMP
@@ -142,18 +137,17 @@ class GlassBannerView(
 
         topGlowPaint.shader = LinearGradient(
             0f, 0f, 0f, dp(24f),
-            intArrayOf(Color.argb(68, 255, 255, 255), Color.TRANSPARENT),
+            intArrayOf(Color.argb(72, 255, 255, 255), Color.TRANSPARENT),
             null,
             Shader.TileMode.CLAMP
         )
 
-        // Bottom curved caustic lens band (replicates the bright bottom refraction band in 90047.mp4)
         bottomLensPaint.shader = LinearGradient(
             0f, (h - dp(18f)).coerceAtLeast(0f), 0f, h.toFloat(),
             intArrayOf(
                 Color.TRANSPARENT,
-                Color.argb(82, 255, 255, 255),
-                Color.argb(38, 30, 36, 48)
+                Color.argb(88, 255, 255, 255),
+                Color.argb(42, 30, 36, 48)
             ),
             floatArrayOf(0f, 0.72f, 1f),
             Shader.TileMode.CLAMP
@@ -209,44 +203,30 @@ class GlassBannerView(
             half4 main(float2 p) {
                 float2 halfRes = max(resolution * 0.5, float2(1.0, 1.0));
                 float r = clamp(cornerRadius, 1.0, min(halfRes.x, halfRes.y));
-                // Signed distance inward from the rounded pill border (0 at border, positive inside)
                 float distInward = max(-sdRoundBox(p - halfRes, halfRes, r), 0.0);
                 float2 uv = p / max(resolution, float2(1.0, 1.0));
 
-                // 3D curved glass optical bevel profile:
-                // 1) Crisp outer specular rim (0..2.2px)
                 float outerRim = exp(-distInward * 0.55);
-                // 2) Subtle internal-reflection dark trough (2.5..6.5px) giving physical glass depth
                 float trough = exp(-pow((distInward - 4.2) / 2.2, 2.0));
-                // 3) Inner convex lens caustic band (6..22px), strongest along bottom & corners
                 float bottomWeight = smoothstep(0.35, 1.0, uv.y) * 0.75 + 0.25;
                 float causticBand = exp(-pow((distInward - 11.5) / 6.5, 2.0)) * bottomWeight;
-
-                // Subtle entrance light refraction sweep
                 float shine = exp(-pow((uv.x - fract(progress * 1.18)) * 8.5, 2.0)) * (1.0 - progress * 0.82);
 
                 if (themeMode > 0.5) {
                     float3 darkVeil = mix(float3(0.09, 0.12, 0.18), float3(0.14, 0.19, 0.28), uv.y);
                     float3 darkSpec = float3(0.82, 0.90, 1.0) * (outerRim * 0.42 + causticBand * 0.18 + shine * 0.10);
                     float3 rgb = clamp(darkVeil + darkSpec - float3(0.04) * trough, 0.0, 1.0);
-                    float alpha = clamp(0.56 + outerRim * 0.22 + causticBand * 0.08, 0.0, 0.88);
-                    // CRITICAL: AGSL requires premultiplied alpha!
+                    float alpha = clamp(0.72 + outerRim * 0.16, 0.0, 0.90);
                     return half4(rgb * alpha, alpha);
                 }
 
-                // Exact iOS 26 Silvery-Frost Liquid Glass from 90047.mp4:
-                // Highly translucent interior (alpha ~ 0.44) so real blurred widgets behind pass through,
-                // with 3D optical bevel refraction around the rounded pill perimeter.
-                float3 glassVeil = mix(float3(0.97, 0.96, 0.98), float3(0.91, 0.93, 0.96), uv.y);
+                // Frosted Silvery-White iOS Liquid Glass inside the banner only (surrounding screen stays 100% sharp!)
+                float3 glassVeil = mix(float3(0.90, 0.90, 0.93), float3(0.84, 0.86, 0.90), uv.y);
                 float3 specLight = float3(1.0, 1.0, 1.0) * (outerRim * 0.36 + causticBand * 0.24 + shine * 0.10);
                 float3 troughShadow = float3(0.18, 0.20, 0.26) * (trough * 0.12);
                 float3 rgb = clamp(glassVeil + specLight - troughShadow, 0.0, 1.0);
 
-                float baseAlpha = 0.43;
-                float bevelAlpha = outerRim * 0.32 + causticBand * 0.14 + trough * 0.05;
-                float alpha = clamp(baseAlpha + bevelAlpha, 0.0, 0.84);
-
-                // Strictly premultiplied alpha output so Skia composites true glass translucency!
+                float alpha = clamp(0.74 + outerRim * 0.14 + causticBand * 0.06, 0.0, 0.90);
                 return half4(rgb * alpha, alpha);
             }
         """

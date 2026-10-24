@@ -74,9 +74,7 @@ internal class OverlayController(private val appContext: Context) {
     private var isTransitioningOut = false
     private var timeout: Runnable? = null
 
-    // Exact fluid expansion curve from 90047.mp4 (Frames F50..F64: fast launch from capsule, zero bouncy overshoot)
     private val expandInterpolator = PathInterpolator(0.20f, 0.92f, 0.28f, 1.0f)
-    // Exact collapse curve from 90047.mp4 (Frames F196..F201 and F418..F424)
     private val collapseInterpolator = PathInterpolator(0.32f, 0.0f, 0.67f, 0.0f)
 
     private fun createOverlayWindowContext(base: Context): Context {
@@ -99,20 +97,17 @@ internal class OverlayController(private val appContext: Context) {
             if (!Settings.canDrawOverlays(appContext)) return@post
 
             val current = activeData
-            // Avoid duplicate burst callbacks with identical content within 800ms
             if (current != null &&
                 current.packageName == data.packageName &&
                 current.title == data.title &&
                 current.body == data.body &&
-                abs(data.postTime - current.postTime) < 800L
+                abs(data.postTime - current.postTime) < 1200L
             ) {
                 return@post
             }
 
-            if (queue.size >= 12) queue.removeFirst()
+            if (queue.size >= 10) queue.removeFirst()
 
-            // If a banner is currently displayed, collapse it back into the top-left capsule
-            // and immediately expand the new notification (just like 00:06.6 in 90047.mp4!)
             if (activeView != null) {
                 queue.addFirst(data)
                 if (!isTransitioningOut) {
@@ -143,12 +138,10 @@ internal class OverlayController(private val appContext: Context) {
         val bannerWidth = (metrics.widthPixels - dp(12)).coerceAtLeast(dp(260))
         val (view, contentRow) = buildBanner(data, themeIndex)
 
-        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        // IMPORTANT: No FLAG_BLUR_BEHIND so the surrounding screen NEVER gets blurred!
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-        }
 
         val params = WindowManager.LayoutParams(
             bannerWidth,
@@ -162,9 +155,6 @@ internal class OverlayController(private val appContext: Context) {
             y = statusBarHeight() + dp(5)
             windowAnimations = 0
             dimAmount = 0f
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                setBlurBehindRadius(dp(22))
-            }
         }
 
         val added = tryAddOverlayView(view, params)
@@ -183,8 +173,6 @@ internal class OverlayController(private val appContext: Context) {
             triggerSubtleHaptic()
         }
 
-        // Exact mathematical trajectory solved from Frames F50..F64 of 90047.mp4:
-        // Fixed horizontal anchor at 11.8% of banner width (directly below the status-bar clock "7:25")
         val pivotX = bannerWidth * 0.118f
         val startScaleX = 0.11f
         val startScaleY = 0.095f
@@ -208,7 +196,6 @@ internal class OverlayController(private val appContext: Context) {
                 view.scaleX = startScaleX + (1f - startScaleX) * p
                 view.scaleY = startScaleY + (1f - startScaleY) * p
                 view.translationY = startTransY * (1f - p)
-                // Alpha reaches 1.0 within first 20% of expansion so the tiny capsule is clearly visible
                 view.alpha = (0.82f + f * 0.9f).coerceIn(0f, 1f)
                 contentRow.alpha = ((f - 0.08f) / 0.52f).coerceIn(0f, 1f)
             }
@@ -418,11 +405,6 @@ internal class OverlayController(private val appContext: Context) {
         }
     }
 
-    /**
-     * Exact reverse trajectory from Frames F196..F201 and F418..F424 of 90047.mp4:
-     * Shrinks back into the tiny top-left capsule under the clock, staying visible as a capsule
-     * until the final 25% of the collapse when it fades out.
-     */
     private fun dismissCurrent(openApp: Boolean, fastReplace: Boolean) {
         mainHandler.post {
             timeout?.let { mainHandler.removeCallbacks(it) }
@@ -464,7 +446,6 @@ internal class OverlayController(private val appContext: Context) {
                     view.scaleY = startScaleY + (endScaleY - startScaleY) * p
                     view.translationX = startTransX * (1f - p)
                     view.translationY = startTransY + (endTransY - startTransY) * p
-                    // Keep capsule visible until f=0.72 (matching F422..F423), then fade to 0
                     view.alpha = if (f < 0.72f) 1f else ((1f - f) / 0.28f).coerceIn(0f, 1f)
                 }
                 addListener(object : AnimatorListenerAdapter() {

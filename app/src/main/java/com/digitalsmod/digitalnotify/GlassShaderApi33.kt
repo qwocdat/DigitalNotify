@@ -5,7 +5,6 @@ import android.graphics.Shader
 import android.os.Build
 import androidx.annotation.RequiresApi
 
-/** Keeps references to API-33-only RuntimeShader out of the main view's field types. */
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 internal object GlassShaderApi33 {
     fun create(source: String): Shader = RuntimeShader(source)
