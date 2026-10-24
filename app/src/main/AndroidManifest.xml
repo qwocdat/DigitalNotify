@@ -38,7 +38,7 @@
 
         <service
             android:name=".NotificationAccessService"
-            android:label="DigitalNotify - Liquid Glass Banner"
+            android:label="DigitalNotify"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
             android:exported="true">
             <intent-filter>
