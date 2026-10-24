@@ -1,0 +1,2 @@
+-keep class com.digitalsmod.digitalnotify.** { *; }
+-dontwarn android.graphics.RuntimeShader

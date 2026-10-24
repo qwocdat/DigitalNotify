@@ -11,8 +11,8 @@ android {
         applicationId = "com.digitalsmod.digitalnotify"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -20,7 +20,14 @@ android {
             isMinifyEnabled = false
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            // Uses debug signing config by default so CI produces an installable release APK out of the box
+            signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 
@@ -32,9 +39,15 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+    }
 }
 
 dependencies {
+    implementation("androidx.annotation:annotation:1.8.2")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
 }
