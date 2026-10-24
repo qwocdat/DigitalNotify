@@ -1,31 +1,40 @@
-# DigitalNotify (prototype 0.1)
+# DigitalNotify v0.2.0 (Pro Liquid Glass Edition)
 
-An Android-native notification listener and floating Liquid Glass-style banner prototype.
+Ứng dụng Android hiển thị thông báo nổi phong cách **Liquid Glass (AGSL Shader)** tốc độ cao, đã được **sửa lỗi build CI/Gradle** và **nâng cấp toàn diện**.
 
-## What is implemented
+## Các điểm đã sửa lỗi Build (Fix Build)
 
-- Kotlin `NotificationListenerService` receives Android notification events.
-- A per-app allowlist stored locally in `SharedPreferences`.
-- Permission shortcuts for Notification Access and display-over-other-apps.
-- Floating overlay banner with app name, title, body, close action and tap-to-open source app.
-- Spring-like entrance motion and a short AGSL procedural highlight sweep on Android 13+.
-- Fallback gradient glass styling on Android 8–12.
-- GitHub Actions workflow to build a debug APK.
+1. **GitHub Actions CI (`.github/workflows/build-apk.yml`)**:
+   - Loại bỏ phụ thuộc vào `android-actions/setup-android@v3` (thường gây lỗi `sdkmanager` / lệch biến môi trường `ANDROID_HOME` trên runner `ubuntu-latest`).
+   - Sử dụng trực tiếp Android SDK có sẵn trên GitHub runner, tự động chấp nhận license (`sdkmanager --licenses`) và cài đặt `platforms;android-35`, `build-tools;35.0.0`.
+   - Tự động nhận diện thư mục chứa `settings.gradle.kts` dù người dùng giải nén ở thư mục gốc hay thư mục con.
+   - Tự động build cả **Debug APK** và **Release APK** (đã tối ưu R8/shrinkResources và ký sẵn để cài ngay trên điện thoại).
+2. **Cấu hình Gradle & Android Manifest**:
+   - Bổ sung `gradle/wrapper/gradle-wrapper.properties` và `.gitignore` chuẩn Android Studio.
+   - Bổ sung `<queries>` và `tools:ignore="QueryAllPackagesPermission"` trong `AndroidManifest.xml`, cấu hình `lint` trong `app/build.gradle.kts` để không chặn quá trình build Release/Debug.
+   - Sửa lỗi khai báo font `sans-serif` trong `styles.xml` và bổ sung icon vector `@drawable/ic_launcher`.
 
-## Important limitations
+## Các tính năng nâng cấp mới (v0.2.0)
 
-- Android only exposes information present in a posted notification. This app does not read private databases or hidden chats inside other apps.
-- Banner content is processed locally; this prototype has no network or cloud upload code.
-- The shader creates a translucent procedural glass surface, rim lighting and a sweep. It does **not** sample pixels from another app's window for true optical refraction. Android does not provide arbitrary access to other apps' framebuffers. Real background distortion would require a separately permitted and carefully designed screen-capture flow, which is not included here.
-- Android/OEM battery management can interrupt background components. Notification listener reconnection is managed by Android, but no app can promise uninterrupted delivery on every device.
-- `QUERY_ALL_PACKAGES` is included for an installable prototype app selector. Google Play distribution requires a valid policy justification for broad package visibility.
+- **Sửa lỗi hiển thị góc bo & đổ bóng (`GlassBannerView`)**: Thêm `ViewOutlineProvider` chuẩn xác và viền kính inset không bị cắt lẹm; bổ sung 3 chủ đề AGSL Shader (**Frost Blue**, **Aurora Violet**, **Obsidian Gold**).
+- **Cử chỉ cảm ứng thông minh trên Banner (`OverlayController`)**:
+  - **Vuốt lên hoặc vuốt ngang** để đóng nhanh banner.
+  - **Chạm và giữ** để tạm dừng bộ đếm tự đóng khi đang đọc nội dung dài.
+  - **Nhấn vào banner** để mở trực tiếp màn hình/cuộc trò chuyện của thông báo (`PendingIntent` với hỗ trợ Android 14/15 `ActivityOptions`), tự động cập nhật nội dung tại chỗ nếu cùng ứng dụng gửi liên tiếp.
+- **Hiển thị Avatar / Large Icon & Rung Haptic**: Tự động hiển thị ảnh đại diện người gửi (nếu có trong thông báo) và phản hồi rung nhẹ 18ms.
+- **Bộ lọc nâng cao (`NotificationAccessService`)**:
+  - Công tắc **Bật/Tắt nhanh** toàn bộ dịch vụ.
+  - Tuỳ chọn **Theo dõi tất cả ứng dụng** hoặc chỉ các ứng dụng được chọn.
+  - Tự động **bỏ qua thông báo đang chạy nền (Ongoing)** như trình phát nhạc, thanh tải xuống.
+  - **Chặn theo từ khóa (Muted Keywords)**.
+- **Giao diện `MainActivity` mới mượt mà**:
+  - Tải danh sách ứng dụng **bất đồng bộ (Background Thread)** và lưu đệm icon/tên ứng dụng, loại bỏ hoàn toàn hiện tượng giật lag khi tìm kiếm.
+  - Nút **Xem thử Banner Liquid Glass ngay** để kiểm tra hiệu ứng tức thì.
+  - **Nhật ký thông báo gần đây** (cho phép nhấn để phát lại banner).
+  - Hỗ trợ **Edge-to-Edge WindowInsets** chuẩn Android 15 (SDK 35) và lối tắt tắt tối ưu hoá pin chạy nền.
 
-## Build on GitHub (phone-friendly)
+## Hướng dẫn Build trên GitHub Actions
 
-1. Create a new repository named `DigitalNotify` and upload the contents of this folder to the repository root.
-2. Open **Actions** and run **Build DigitalNotify APK** (or push to `main`/`master`).
-3. Open the completed workflow run and download the `DigitalNotify-debug-apk` artifact.
-4. Install `app-debug.apk` on your Android phone.
-5. Open DigitalNotify, enable Notification Access, allow display-over-other-apps, then select the apps to track.
-
-The project uses Gradle 8.9, JDK 17, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, compile SDK 35 and min SDK 26.
+1. Tạo repository mới trên GitHub và tải toàn bộ các file trong bản zip này lên repository.
+2. Mở tab **Actions** -> chọn workflow **Build DigitalNotify APK** -> nhấn **Run workflow**.
+3. Sau khi chạy xong (khoảng 1–2 phút), tải file `DigitalNotify-debug-apk` hoặc `DigitalNotify-release-apk` về điện thoại và cài đặt.
