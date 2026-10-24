@@ -20,4 +20,8 @@ internal object GlassShaderApi33 {
             setFloatUniform("progress", progress)
         }
     }
+
+    fun setTheme(shader: Shader?, themeIndex: Int) {
+        (shader as? RuntimeShader)?.setFloatUniform("themeMode", themeIndex.toFloat())
+    }
 }
