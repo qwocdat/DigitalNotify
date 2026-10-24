@@ -11,8 +11,8 @@ android {
         applicationId = "com.digitalsmod.digitalnotify"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 5
+        versionName = "0.5.0"
     }
 
     buildTypes {
@@ -22,7 +22,6 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            // Uses debug signing config by default so CI produces an installable release APK out of the box
             signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
